@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Website Checker Pro</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+
+<body>
+
+    <nav class="navbar sticky-top">
+        <div class="container-fluid app-container">
+            <span class="navbar-brand mb-0 h1 text-white">Website Checker 🚀</span>
+        </div>
+    </nav>
+
+    <div class="container app-container my-5">
+        <div class="hero-text text-center mb-5">
+            <h1>Check. Analyze. Export.</h1>
+            <p class="lead">Enter a list of websites to check their status and domain info.</p>
+        </div>
+
+        <div id="error-container"></div>
+
+        <div class="bento-grid">
+            <div class="bento-cell cell-input">
+                <form id="check-form">
+                    <div class="mb-3">
+                        <label for="urls" class="form-label">Enter URLs (comma or newline separated)</label>
+                        <textarea name="urls" id="urls" class="form-control" rows="10"></textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label for="file" class="form-label">Or Upload any File (will find URLs inside)</label>
+                        <input type="file" name="file" id="file" class="form-control">
+                    </div>
+                </form>
+            </div>
+
+            <div class="bento-cell cell-action">
+                <h3>Ready to Go?</h3>
+                <p>Start the check. Results will appear below as they complete.</p>
+                <button type="submit" form="check-form" id="check-btn" class="btn btn-primary btn-lg w-100">
+                    Check Websites
+                </button>
+            </div>
+        </div>
+        <div id="progress-container">
+            <div class="spinner-border" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <h3 id="progress-text" class="mt-4">Checking...</h3>
+            <p id="timer-text" class="lead text-white mb-0">Time Elapsed: 0s</p>
+        </div>
+
+        <div class="results-wrapper" id="results-container">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h2 class="h4 mb-0 text-white">RESULTS</h2>
+                    <div class="btn-group" role="group" id="results-actions">
+                        <button id="export-btn" class="btn btn-success">Export to CSV</button>
+                        <button id="clear-btn" class="btn btn-danger">Clear Results</button>
+                    </div>
+                </div>
+
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>URL</th>
+                                <th>Status</th>
+                                <th>Time Taken</th>
+                                <th>Domain Info</th>
+                                <th>SEO</th>
+                                <th>Sitemap</th>
+                            </tr>
+                        </thead>
+                        <tbody id="results-tbody">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- SEO Modal -->
+        <div class="modal fade" id="seoModal" tabindex="-1" aria-labelledby="seoModalLabel" aria-hidden="true">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="seoModalLabel">SEO Information</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="seo-content">
+                            <!-- SEO content will be populated here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+    <script>
+        // --- 0. Global variables & DOM Elements ---
+        let globalResults = [];
+        let timerInterval = null;
+        let startTime = 0;
+
+        // DOM Elements
+        const checkForm = document.getElementById('check-form');
+        const checkBtn = document.getElementById('check-btn');
+        const errorContainer = document.getElementById('error-container');
+        const progressContainer = document.getElementById('progress-container');
+        const progressText = document.getElementById('progress-text');
+        const timerText = document.getElementById('timer-text');
+        const resultsTbody = document.getElementById('results-tbody');
+
+        // --- MODIFIED DOM Elements ---
+        const resultsContainer = document.getElementById('results-container'); // New wrapper
+        const exportBtn = document.getElementById('export-btn');
+        const clearBtn = document.getElementById('clear-btn');
+        const themeToggle = document.getElementById('theme-toggle');
+        const themeLabel = document.getElementById('theme-label');
+
+
+        // --- 1. Main Submit Handler ---
+        checkForm.addEventListener('submit', async function (event) {
+            event.preventDefault();
+
+            // --- Reset UI ---
+            globalResults = [];
+            errorContainer.innerHTML = '';
+            resultsTbody.innerHTML = '';
+            resultsContainer.style.display = 'none'; // <-- MODIFIED
+            checkBtn.disabled = true;
+            progressContainer.style.display = 'block';
+
+            const urlsToProcess = await getUrlsFromForm();
+            const totalUrls = urlsToProcess.length;
+
+            if (totalUrls === 0) {
+                showError("No valid URLs found in the text area or file.");
+                resetUI();
+                return;
+            }
+
+            startTimer();
+
+            // --- Loop and Fetch one by one ---
+            for (let i = 0; i < totalUrls; i++) {
+                const url = urlsToProcess[i];
+                progressText.innerText = `Checking ${i + 1} of ${totalUrls}: ${url}`;
+
+                try {
+                    const response = await fetch("/check_one", {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: url })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`Server error: ${response.statusText}`);
+                    }
+
+                    const data = await response.json();
+
+                    if (data.result) {
+                        globalResults.push(data.result);
+                        appendResultToTable(data.result);
+                    } else if (data.error) {
+                        showError(data.error);
+                    }
+
+                } catch (err) {
+                    const errorResult = {
+                        url: url,
+                        status: "Check Failed",
+                        duration: "0.00s",
+                        domain_info: {}
+                    };
+                    globalResults.push(errorResult);
+                    appendResultToTable(errorResult);
+                }
+            }
+
+            // --- Finalize ---
+            stopTimer();
+            progressContainer.style.display = 'none';
+            checkBtn.disabled = false;
+            if (globalResults.length > 0) {
+                resultsContainer.style.display = 'block'; // <-- MODIFIED
+            }
+        });
+
+        // --- 2. URL Parsing Function ---
+        function isValidUrlFormat(str) {
+            if (!str) return false;
+            if (!str.includes('.')) return false;
+            if (!isNaN(str)) return false;
+
+            const parts = str.split('.');
+            let tld = parts[parts.length - 1];
+
+            if (tld.endsWith('/')) {
+                tld = tld.slice(0, -1);
+            }
+
+            const tldRegex = /^[a-zA-Z]{2,}$/;
+            return tldRegex.test(tld);
+        }
+
+        async function getUrlsFromForm() {
+            let urls = new Set();
+            const textUrls = document.getElementById('urls').value;
+            textUrls.split(/[\n,]+/).forEach(url => {
+                let cleanUrl = url.trim();
+                if (isValidUrlFormat(cleanUrl)) {
+                    urls.add(cleanUrl);
+                }
+            });
+            const fileInput = document.getElementById('file');
+            if (fileInput.files.length > 0) {
+                const file = fileInput.files[0];
+                try {
+                    const fileContent = await file.text();
+                    fileContent.split(/[\s,]+/).forEach(url => {
+                        let cleanUrl = url.trim();
+                        if (isValidUrlFormat(cleanUrl)) {
+                            urls.add(cleanUrl);
+                        }
+                    });
+                } catch (e) {
+                    showError(`Could not read file: ${e.message}`);
+                }
+            }
+            return Array.from(urls);
+        }
+
+        // --- 3. Helper to append a single row to the table ---
+        function appendResultToTable(res) {
+            const statusBadge = res.status.startsWith('Working')
+                ? `<span class="badge bg-success-subtle text-success-emphasis">${res.status}</span>` // <-- Updated badge classes
+                : `<span class="badge bg-danger-subtle text-danger-emphasis">${res.status}</span>`; // <-- Updated badge classes
+
+            let domainInfo = '-';
+            if (res.domain_info && res.domain_info.domain) {
+                domainInfo = `
+                    <small>
+                        <strong>Registrar:</strong> ${res.domain_info.registrar || 'Unknown'}<br>
+                        <strong>Registered:</strong> ${res.domain_info.registered_on}<br>
+                        <strong>Expires:</strong> ${res.domain_info.expires_on}<br>
+                        <strong>Updated:</strong> ${res.domain_info.updated_on}
+                    </small>`;
+            }
+
+            let sitemapCell = '<td>-</td>';
+            if (res.status.startsWith('Working')) {
+                sitemapCell = `
+                    <td class="text-start">
+                        <button class="btn btn-sm btn-outline-primary btn-generate" onclick="generateSitemap(this, '${res.url}')">
+                            Generate
+                        </button>
+                    </td>`;
+            }
+
+            const seo = res.seo || {};
+            const seoCell = `
+                <td class="text-center">
+                    <button class="btn btn-sm btn-outline-primary" onclick="showSeoModal('${res.url}', ${JSON.stringify(seo).replace(/"/g, '&quot;')})">
+                        View SEO
+                    </button>
+                </td>`;
+
+            const rowHtml = `
+                <tr>
+                    <td style="word-break: break-all;">${res.url}</td>
+                    <td>${statusBadge}</td>
+                    <td>${res.duration}</td>
+                    <td>${domainInfo}</td>
+                    ${seoCell}
+                    ${sitemapCell} </tr>`;
+
+            resultsTbody.insertAdjacentHTML('beforeend', rowHtml);
+        }
+
+        // --- 4. Timer Functions ---
+        function startTimer() {
+            startTime = Date.now();
+            timerText.innerText = "Time Elapsed: 0s";
+            timerInterval = setInterval(() => {
+                const seconds = Math.floor((Date.now() - startTime) / 1000);
+                timerText.innerText = `Time Elapsed: ${seconds}s`;
+            }, 1000);
+        }
+
+        function stopTimer() {
+            clearInterval(timerInterval);
+        }
+
+        // --- 5. Action Button Handlers (Export, Clear) ---
+        exportBtn.addEventListener('click', function () {
+            let csvContent = "data:text/csv;charset=utf-8,";
+            csvContent += "URL,Status,Time Taken (s),Registrar,Registered On,Expires On,Updated On,SEO Score,SEO Grade,Title,Description,Keywords,OG Title,OG Description,Twitter Card,Canonical URL,H1 Tags,Images,Alt Coverage\r\n";
+
+            globalResults.forEach(res => {
+                const info = res.domain_info || {};
+                const row = [
+                    res.url,
+                    res.status,
+                    res.duration.replace('s', ''),
+                    info.registrar || '-',
+                    info.registered_on || '-',
+                    info.expires_on || '-',
+                    info.updated_on || '-',
+                    (res.seo && res.seo.seo_score) ? res.seo.seo_score : '-',
+                    (res.seo && res.seo.seo_grade) ? res.seo.seo_grade : '-',
+                    (res.seo && res.seo.title) ? `"${res.seo.title.replaceAll('"', '""')}"` : '-',
+                    (res.seo && res.seo.description) ? `"${res.seo.description.replaceAll('"', '""')}"` : '-',
+                    (res.seo && res.seo.keywords) ? `"${res.seo.keywords.replaceAll('"', '""')}"` : '-',
+                    (res.seo && res.seo.og_title) ? `"${res.seo.og_title.replaceAll('"', '""')}"` : '-',
+                    (res.seo && res.seo.og_description) ? `"${res.seo.og_description.replaceAll('"', '""')}"` : '-',
+                    (res.seo && res.seo.twitter_card) ? res.seo.twitter_card : '-',
+                    (res.seo && res.seo.canonical) ? res.seo.canonical : '-',
+                    (res.seo && res.seo.h1_tags && res.seo.h1_tags.length > 0) ? `"${res.seo.h1_tags.join('; ').replaceAll('"', '""')}"` : '-',
+                    (res.seo && res.seo.total_images) ? res.seo.total_images : '-',
+                    (res.seo && res.seo.total_images > 0) ? Math.round(((res.seo.total_images - res.seo.images_without_alt) / res.seo.total_images) * 100) + '%' : '-'
+                ].join(",");
+                csvContent += row + "\r\n";
+            });
+
+            var encodedUri = encodeURI(csvContent);
+            var link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", "website_check_results.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+
+        clearBtn.addEventListener('click', function () {
+            resetUI();
+            document.getElementById('urls').value = '';
+            document.getElementById('file').value = '';
+        });
+
+        // --- 6. Utility Functions ---
+        function resetUI() {
+            globalResults = [];
+            errorContainer.innerHTML = '';
+            resultsTbody.innerHTML = '';
+            resultsContainer.style.display = 'none'; // <-- MODIFIED
+            progressContainer.style.display = 'none';
+            checkBtn.disabled = false;
+            stopTimer();
+        }
+
+        function showError(message) {
+            errorContainer.innerHTML = `
+                <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                    <strong>Error:</strong> ${message}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>`;
+        }
+
+        // --- 7. SITEMAP GENERATION FUNCTIONS ---
+        async function generateSitemap(button, url) {
+            button.disabled = true;
+            button.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>';
+            let isSuccess = false;
+
+            try {
+                const response = await fetch("/generate_sitemap", {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: url })
+                });
+
+                if (!response.ok) {
+                    throw new Error("Crawl failed on server.");
+                }
+                const data = await response.json();
+                const xmlContent = buildSitemapXML(data.urls);
+                downloadFile(xmlContent, "sitemap.xml", "application/xml");
+                isSuccess = true;
+
+            } catch (err) {
+                showError(`Sitemap generation failed: ${err.message}`);
+            } finally {
+                button.disabled = false;
+                if (isSuccess) {
+                    button.innerHTML = "Generated";
+                } else {
+                    button.innerHTML = "Generate";
+                }
+            }
+        }
+
+        function buildSitemapXML(urls) {
+            let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+            xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
+            const today = new Date().toISOString().split('T')[0];
+
+            urls.forEach(url => {
+                const cleanUrl = url.replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&apos;');
+
+                xml += '  <url>\n';
+                xml += `    <loc>${cleanUrl}</loc>\n`;
+                xml += `    <lastmod>${today}</lastmod>\n`;
+                xml += '  </url>\n';
+            });
+            xml += '</urlset>';
+            return xml;
+        }
+
+        function downloadFile(content, fileName, contentType) {
+            const a = document.createElement("a");
+            const file = new Blob([content], { type: contentType });
+            a.href = URL.createObjectURL(file);
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            URL.revokeObjectURL(a.href);
+            document.body.removeChild(a);
+        }
+
+        // --- 8. SEO Modal Function ---
+        function showSeoModal(url, seoData) {
+            const seoContent = document.getElementById('seo-content');
+            const modal = new bootstrap.Modal(document.getElementById('seoModal'));
+
+            let content = `
+                <div class="seo-item">
+                    <h6>URL</h6>
+                    <p>${url}</p>
+                </div>
+                
+                <div class="seo-score">
+                    <h6>SEO Score</h6>
+                    <div class="score-display">
+                        <span class="score-number">${seoData.seo_score || 0}/100</span>
+                        <span class="score-grade grade-${(seoData.seo_grade || 'F').toLowerCase()}">${seoData.seo_grade || 'F'}</span>
+                    </div>
+                </div>
+            `;
+
+            // Basic SEO
+            content += `
+                <div class="seo-item">
+                    <h6>Title</h6>
+                    <p>${seoData.title || 'No Title'}</p>
+                </div>
+            `;
+
+            content += `
+                <div class="seo-item">
+                    <h6>Description</h6>
+                    <p>${seoData.description || 'No Description'}</p>
+                </div>
+            `;
+
+            content += `
+                <div class="seo-item">
+                    <h6>Keywords</h6>
+                    <p>${seoData.keywords || 'No Keywords'}</p>
+                </div>
+            `;
+
+            // Open Graph - Always show section
+            content += `
+                <div class="seo-section">
+                    <h5>Open Graph (Facebook)</h5>
+                    <div class="seo-item">
+                        <h6>OG Title</h6>
+                        <p>${seoData.og_title || 'No OG Title'}</p>
+                    </div>
+                    <div class="seo-item">
+                        <h6>OG Description</h6>
+                        <p>${seoData.og_description || 'No OG Description'}</p>
+                    </div>
+                    <div class="seo-item">
+                        <h6>OG Image</h6>
+                        <p>${seoData.og_image || 'No OG Image'}</p>
+                    </div>
+                    <div class="seo-item">
+                        <h6>OG URL</h6>
+                        <p>${seoData.og_url || 'No OG URL'}</p>
+                    </div>
+                </div>
+            `;
+
+            // Twitter Cards - Always show section
+            content += `
+                <div class="seo-section">
+                    <h5>Twitter Cards</h5>
+                    <div class="seo-item">
+                        <h6>Twitter Card Type</h6>
+                        <p>${seoData.twitter_card || 'No Twitter Card'}</p>
+                    </div>
+                    <div class="seo-item">
+                        <h6>Twitter Title</h6>
+                        <p>${seoData.twitter_title || 'No Twitter Title'}</p>
+                    </div>
+                    <div class="seo-item">
+                        <h6>Twitter Description</h6>
+                        <p>${seoData.twitter_description || 'No Twitter Description'}</p>
+                    </div>
+                    <div class="seo-item">
+                        <h6>Twitter Image</h6>
+                        <p>${seoData.twitter_image || 'No Twitter Image'}</p>
+                    </div>
+                </div>
+            `;
+
+            // Technical SEO
+            content += `
+                <div class="seo-section">
+                    <h5>Technical SEO</h5>
+                    <div class="seo-item">
+                        <h6>Canonical URL</h6>
+                        <p>${seoData.canonical || 'No Canonical URL'}</p>
+                    </div>
+                    <div class="seo-item">
+                        <h6>Robots Meta</h6>
+                        <p>${seoData.robots || 'No Robots Meta'}</p>
+                    </div>
+                </div>
+            `;
+
+            // Content Analysis - Always show section
+            content += `
+                <div class="seo-section">
+                    <h5>Content Analysis</h5>
+                    <div class="seo-item">
+                        <h6>H1 Tags (${seoData.h1_tags ? seoData.h1_tags.length : 0})</h6>
+                        ${seoData.h1_tags && seoData.h1_tags.length > 0 ?
+                    `<ul>${seoData.h1_tags.map(tag => `<li>${tag}</li>`).join('')}</ul>` :
+                    '<p>No H1 Tags</p>'
+                }
+                    </div>
+                </div>
+            `;
+
+            // Image Analysis - Always show section
+            content += `
+                <div class="seo-section">
+                    <h5>Image Analysis</h5>
+                    <div class="seo-item">
+                        <h6>Images</h6>
+                        <p>Total: ${seoData.total_images || 0} | Without Alt: ${seoData.images_without_alt || 0} | Alt Coverage: ${seoData.total_images > 0 ? Math.round(((seoData.total_images - seoData.images_without_alt) / seoData.total_images) * 100) : 0}%</p>
+                    </div>
+                </div>
+            `;
+
+            seoContent.innerHTML = content;
+            modal.show();
+        }
+
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+
+</html>
