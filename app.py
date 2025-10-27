@@ -1,11 +1,10 @@
 from flask import Flask, render_template, request, jsonify
 import os
 import requests
-import whois
+from urllib.parse import urlparse
+from datetime import datetime
 import validators  
 from bs4 import BeautifulSoup
-from datetime import datetime, timezone
-import tldextract
 import time 
 import re
 import socket
@@ -373,6 +372,129 @@ def check_url(url):
     result['duration'] = f"{end_time - start_time:.2f}s" 
     return result
 
+
+def _parse_iso(dt):
+    try:
+        if not dt:
+            return None
+        return datetime.fromisoformat(dt.replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+def get_domain_info(raw):
+    domain = raw.strip()
+    # normalize: remove scheme/path
+    if domain.startswith('http://') or domain.startswith('https://'):
+        domain = urlparse(domain).netloc
+    domain = domain.rstrip('/')
+
+    result = {"domain": domain, "registrar": "Unknown", "registered_on": "Unknown",
+              "expires_on": "Unknown", "updated_on": "Unknown"}
+
+    # Try python-whois first (if installed)
+    try:
+        import whois
+        w = whois.whois(domain)
+        def _first(d):
+            if isinstance(d, list):
+                return d[0] if d else None
+            return d
+        creation = _first(w.creation_date)
+        expiration = _first(w.expiration_date)
+        updated = _first(w.updated_date)
+
+        if creation:
+            result['registered_on'] = creation.strftime('%Y-%m-%d %H:%M:%S') if hasattr(creation, 'strftime') else str(creation)
+        if expiration:
+            result['expires_on'] = expiration.strftime('%Y-%m-%d %H:%M:%S') if hasattr(expiration, 'strftime') else str(expiration)
+        if updated:
+            result['updated_on'] = updated.strftime('%Y-%m-%d %H:%M:%S') if hasattr(updated, 'strftime') else str(updated)
+        result['registrar'] = w.registrar or result['registrar']
+
+        # return early if we have meaningful data
+        if result['registrar'] != "Unknown" or result['registered_on'] != "Unknown":
+            return result
+    except Exception as e:
+        print(f"[domain] python-whois failed for {domain}: {e}")
+
+    # RDAP HTTPS fallback (rdap.org)
+    try:
+        rdap_resp = requests.get(f"https://rdap.org/domain/{domain}", timeout=10,
+                                 headers={'User-Agent': 'WebsiteChecker/1.0'})
+        if rdap_resp.ok:
+            rdap = rdap_resp.json()
+            creation = expiration = updated = None
+            for ev in rdap.get('events', []):
+                action = (ev.get('eventAction') or '').lower()
+                date = ev.get('eventDate')
+                if 'registration' in action:
+                    creation = _parse_iso(date) or creation
+                elif 'expiration' in action:
+                    expiration = _parse_iso(date) or expiration
+                elif 'last' in action or 'update' in action:
+                    updated = _parse_iso(date) or updated
+
+            if creation:
+                result['registered_on'] = creation.strftime('%Y-%m-%d %H:%M:%S')
+            if expiration:
+                result['expires_on'] = expiration.strftime('%Y-%m-%d %H:%M:%S')
+            if updated:
+                result['updated_on'] = updated.strftime('%Y-%m-%d %H:%M:%S')
+
+            # try to extract registrar from entities/vcard
+            entities = rdap.get('entities') or []
+            if entities:
+                for ent in entities:
+                    vcard = ent.get('vcardArray')
+                    if vcard and len(vcard) > 1:
+                        for item in vcard[1]:
+                            if len(item) >= 4 and item[0].lower() in ('fn', 'org', 'organization'):
+                                registrar = item[3] or None
+                                if registrar:
+                                    result['registrar'] = registrar
+                                    break
+                    if result['registrar'] != "Unknown":
+                        break
+            # return if we have any useful data
+            if result['registrar'] != "Unknown" or result['registered_on'] != "Unknown":
+                return result
+        else:
+            print(f"[domain] RDAP returned status {rdap_resp.status_code} for {domain}")
+    except Exception as e:
+        print(f"[domain] RDAP failed for {domain}: {e}")
+
+    # Optional commercial WHOIS API fallback (example: WHOISXMLAPI). Configure WHOIS_API_KEY in env.
+    api_key = os.getenv('WHOIS_API_KEY')
+    if api_key:
+        try:
+            api_url = f"https://www.whoisxmlapi.com/whoisserver/WhoisService?apiKey={api_key}&domainName={domain}&outputFormat=JSON"
+            r = requests.get(api_url, timeout=10, headers={'User-Agent': 'WebsiteChecker/1.0'})
+            if r.ok:
+                j = r.json()
+                whois_record = j.get('WhoisRecord', {})
+                registrar = whois_record.get('registrarName')
+                created = whois_record.get('createdDate')
+                expires = whois_record.get('expiresDate')
+                updated = whois_record.get('updatedDate')
+                if registrar:
+                    result['registrar'] = registrar
+                if created:
+                    parsed = _parse_iso(created) or None
+                    result['registered_on'] = parsed.strftime('%Y-%m-%d %H:%M:%S') if parsed else created
+                if expires:
+                    parsed = _parse_iso(expires) or None
+                    result['expires_on'] = parsed.strftime('%Y-%m-%d %H:%M:%S') if parsed else expires
+                if updated:
+                    parsed = _parse_iso(updated) or None
+                    result['updated_on'] = parsed.strftime('%Y-%m-%d %H:%M:%S') if parsed else updated
+                return result
+            else:
+                print(f"[domain] WHOIS API returned {r.status_code} for {domain}")
+        except Exception as e:
+            print(f"[domain] WHOIS API failed for {domain}: {e}")
+
+    # Nothing found; return Unknowns
+    return result
 
 @app.route("/", methods=["GET"])
 def index():
