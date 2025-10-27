@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import tldextract
 import time 
 import re
+import socket
 from urllib.parse import urljoin, urlsplit
 
 app = Flask(__name__)
@@ -286,7 +287,7 @@ def check_url(url):
 
     # --- SITEMAP FINDER LOGIC REMOVED ---
 
-    # WHOIS / domain info
+    # WHOIS / domain info (try python-whois first, fallback to RDAP over HTTPS)
     try:
         w = whois.whois(domain)
 
@@ -301,15 +302,72 @@ def check_url(url):
 
         result['domain_info'] = {
             "domain": domain,
-            "registrar": w.registrar or "Unknown", # <-- ADDED THIS LINE
+            "registrar": w.registrar or "Unknown",
             "registered_on": creation_date.strftime('%Y-%m-%d %H:%M:%S') if creation_date else "Unknown",
             "expires_on": expiration_date.strftime('%Y-%m-%d %H:%M:%S') if expiration_date else "Unknown",
             "updated_on": updated_date.strftime('%Y-%m-%d %H:%M:%S') if updated_date else "Unknown",
         }
-        
     except Exception as e:
-        result['domain_info'] = {}
+        # Log the failure (visible in Render logs)
+        print(f"WHOIS failed for {domain}: {e}")
 
+        # RDAP fallback via HTTPS (rdap.org) — Render allows HTTPS egress
+        try:
+            rdap_resp = requests.get(f"https://rdap.org/domain/{domain}", timeout=10,
+                                     headers={'User-Agent': 'WebsiteChecker/1.0'})
+            if rdap_resp.ok:
+                rdap = rdap_resp.json()
+
+                # helper parse
+                def parse_iso(dt):
+                    try:
+                        if not dt:
+                            return None
+                        # rdap times often end with 'Z'
+                        return datetime.fromisoformat(dt.replace('Z', '+00:00'))
+                    except Exception:
+                        return None
+
+                creation_date = None
+                expiration_date = None
+                updated_date = None
+                # 'events' is common in RDAP responses
+                for ev in rdap.get('events', []):
+                    action = ev.get('eventAction', '').lower()
+                    date = ev.get('eventDate')
+                    if 'registration' in action:
+                        creation_date = parse_iso(date)
+                    elif 'expiration' in action:
+                        expiration_date = parse_iso(date)
+                    elif 'last' in action or 'update' in action:
+                        updated_date = parse_iso(date)
+
+                # registrar extraction best-effort
+                registrar = "Unknown"
+                entities = rdap.get('entities') or []
+                if entities:
+                    # try to find a vcard with org/name
+                    ent = entities[0]
+                    vcard = ent.get('vcardArray')
+                    if vcard and len(vcard) > 1:
+                        for item in vcard[1]:
+                            if len(item) >= 4 and item[0].lower() in ('fn', 'org', 'organization'):
+                                registrar = item[3] or registrar
+                                break
+
+                result['domain_info'] = {
+                    "domain": domain,
+                    "registrar": registrar or "Unknown",
+                    "registered_on": creation_date.strftime('%Y-%m-%d %H:%M:%S') if creation_date else "Unknown",
+                    "expires_on": expiration_date.strftime('%Y-%m-%d %H:%M:%S') if expiration_date else "Unknown",
+                    "updated_on": updated_date.strftime('%Y-%m-%d %H:%M:%S') if updated_date else "Unknown",
+                }
+            else:
+                print(f"RDAP lookup returned {rdap_resp.status_code} for {domain}")
+                result['domain_info'] = {}
+        except Exception as e2:
+            print(f"RDAP fallback failed for {domain}: {e2}")
+            result['domain_info'] = {}
     
     end_time = time.perf_counter() 
     result['duration'] = f"{end_time - start_time:.2f}s" 
