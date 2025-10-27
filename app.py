@@ -1,19 +1,16 @@
 from flask import Flask, render_template, request, jsonify
 import os
 import requests
+import whois
 import validators  
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 import tldextract
 import time 
 import re
-import socket
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit # <-- NEW IMPORTS
 
 app = Flask(__name__)
-
-# Get API key from environment variable
-WHOIS_API_KEY = os.getenv('WHOIS_API_KEY', '')
 
 # --- CRAWLER FUNCTION ---
 def crawl_site(start_url, max_pages=50):
@@ -206,8 +203,7 @@ def extract_seo_from_html(html: str) -> dict:
             'seo_score': seo_score,
             'seo_grade': get_seo_grade(seo_score)
         }
-    except Exception as e:
-        print(f"SEO extraction error: {e}")
+    except Exception:
         return {
             'title': None,
             'description': None,
@@ -244,97 +240,6 @@ def get_seo_grade(score):
     else:
         return 'F'
 
-
-def get_whois_data_from_api(domain):
-    """
-    Get WHOIS data using RapidAPI's FREE WHOIS API (500 requests/month).
-    Returns registrar, registration date, expiration date, and updated date.
-    """
-    default_info = {
-        "domain": domain,
-        "registrar": "Unknown",
-        "registered_on": "Unknown",
-        "expires_on": "Unknown",
-        "updated_on": "Unknown"
-    }
-    
-    # Check if API key is configured
-    if not WHOIS_API_KEY:
-        print("⚠️ WHOIS_API_KEY not set - returning Unknown values")
-        print("👉 Get FREE API key from: https://rapidapi.com/Whois-Lookup-Whois-Lookup-default/api/whois-lookup8")
-        print("📝 Sign up for 100% FREE plan (500 requests/month, NO CREDIT CARD!)")
-        return default_info
-    
-    try:
-        # Call RapidAPI WHOIS v2 (FREE - 500 requests/month)
-        print(f"🔍 Fetching WHOIS data for {domain} from RapidAPI...")
-        
-        response = requests.get(
-            f'https://whois-v2.p.rapidapi.com/domain',
-            params={'domain': domain},
-            headers={
-                'X-RapidAPI-Key': WHOIS_API_KEY,
-                'X-RapidAPI-Host': 'whois-v2.p.rapidapi.com'
-            },
-            timeout=10
-        )
-        
-        if response.ok:
-            data = response.json()
-            
-            # Extract WHOIS data from RapidAPI response
-            registrar = data.get('registrar', 'Unknown')
-            created_date = data.get('createdDate', '')
-            expiry_date = data.get('expiryDate', '')
-            updated_date = data.get('updatedDate', '')
-            
-            # Format dates nicely
-            def format_whois_date(date_str):
-                if not date_str:
-                    return "Unknown"
-                try:
-                    # RapidAPI returns dates in ISO format
-                    if 'T' in date_str:
-                        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                        return dt.strftime('%Y-%m-%d %H:%M:%S')
-                    else:
-                        # Try parsing as date only
-                        dt = datetime.strptime(date_str.split()[0], '%Y-%m-%d')
-                        return dt.strftime('%Y-%m-%d %H:%M:%S')
-                except Exception as e:
-                    print(f"Date parsing error: {e}")
-                    return date_str if date_str else "Unknown"
-            
-            result = {
-                "domain": domain,
-                "registrar": registrar if registrar else "Unknown",
-                "registered_on": format_whois_date(created_date),
-                "expires_on": format_whois_date(expiry_date),
-                "updated_on": format_whois_date(updated_date)
-            }
-            
-            print(f"✅ WHOIS data retrieved successfully for {domain}")
-            print(f"   Registrar: {result['registrar']}")
-            return result
-            
-        else:
-            print(f"❌ RapidAPI WHOIS error for {domain}: HTTP {response.status_code}")
-            if response.status_code == 401 or response.status_code == 403:
-                print("🔑 Invalid API key - check your WHOIS_API_KEY")
-            elif response.status_code == 429:
-                print("⏳ Rate limit reached (500/month) - wait for next month")
-            else:
-                print(f"Response: {response.text[:200]}")
-            return default_info
-            
-    except requests.exceptions.Timeout:
-        print(f"⏱️ RapidAPI timeout for {domain}")
-        return default_info
-    except Exception as e:
-        print(f"❌ RapidAPI WHOIS failed for {domain}: {str(e)}")
-        return default_info
-
-
 def check_url(url):
     """Checks a single URL and returns a result dictionary."""
     start_time = time.perf_counter() 
@@ -345,6 +250,7 @@ def check_url(url):
         "domain_info": {},
         "seo": {"title": None, "description": None, "keywords": None},
         "duration": "0.00s",
+        # "sitemap_url": None  <-- REMOVED
     }
 
     # Validate URL
@@ -374,13 +280,36 @@ def check_url(url):
         if response.ok and 'text/html' in content_type:
             result['seo'] = extract_seo_from_html(response.text)
     except requests.exceptions.Timeout:
-        result['status'] = "Not Working (Timeout)"
+        result['status'] = "Not Working"
     except requests.exceptions.RequestException as e:
         result['status'] = "Not Working"
-        print(f"Request failed for {url}: {e}")
 
-    # Get WHOIS data from FREE RapidAPI
-    result['domain_info'] = get_whois_data_from_api(domain)
+    # --- SITEMAP FINDER LOGIC REMOVED ---
+
+    # WHOIS / domain info
+    try:
+        w = whois.whois(domain)
+
+        def get_date(date_val):
+            if isinstance(date_val, list):
+                return date_val[0] if date_val else None
+            return date_val
+
+        creation_date = get_date(w.creation_date)
+        expiration_date = get_date(w.expiration_date)
+        updated_date = get_date(w.updated_date)
+
+        result['domain_info'] = {
+            "domain": domain,
+            "registrar": w.registrar or "Unknown", # <-- ADDED THIS LINE
+            "registered_on": creation_date.strftime('%Y-%m-%d %H:%M:%S') if creation_date else "Unknown",
+            "expires_on": expiration_date.strftime('%Y-%m-%d %H:%M:%S') if expiration_date else "Unknown",
+            "updated_on": updated_date.strftime('%Y-%m-%d %H:%M:%S') if updated_date else "Unknown",
+        }
+        
+    except Exception as e:
+        result['domain_info'] = {}
+
     
     end_time = time.perf_counter() 
     result['duration'] = f"{end_time - start_time:.2f}s" 
@@ -412,10 +341,9 @@ def check_one():
     
     return jsonify(result=result)
 
-
+# --- NEW ROUTE TO GENERATE SITEMAP ---
 @app.route("/generate_sitemap", methods=["POST"])
 def generate_sitemap():
-    """Generates sitemap by crawling the website."""
     data = request.get_json()
     url = data.get('url')
     
@@ -429,6 +357,7 @@ def generate_sitemap():
     found_urls = crawl_site(url)
     
     return jsonify(urls=list(found_urls))
+# --- END OF NEW ROUTE ---
 
 
 if __name__ == "__main__":
