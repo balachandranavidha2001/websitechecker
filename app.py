@@ -1,16 +1,21 @@
 from flask import Flask, render_template, request, jsonify
 import os
 import requests
-import whois
-import validators  
+# import whois  <-- This line is removed
+import validators
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 import tldextract
-import time 
+import time
 import re
-from urllib.parse import urljoin, urlsplit # <-- NEW IMPORTS
+from urllib.parse import urljoin, urlsplit
 
 app = Flask(__name__)
+
+# --- ADDED API CONFIG ---
+API_KEY = os.environ.get('WHOIS_API_KEY')
+API_URL = 'https://api.api-ninjas.com/v1/whois?domain='
+# ------------------------
 
 # --- CRAWLER FUNCTION ---
 def crawl_site(start_url, max_pages=50):
@@ -250,7 +255,6 @@ def check_url(url):
         "domain_info": {},
         "seo": {"title": None, "description": None, "keywords": None},
         "duration": "0.00s",
-        # "sitemap_url": None  <-- REMOVED
     }
 
     # Validate URL
@@ -284,31 +288,41 @@ def check_url(url):
     except requests.exceptions.RequestException as e:
         result['status'] = "Not Working"
 
-    # --- SITEMAP FINDER LOGIC REMOVED ---
 
-    # WHOIS / domain info
-    try:
-        w = whois.whois(domain)
+    # --- THIS BLOCK IS REPLACED ---
+    if API_KEY:
+        try:
+            headers = { 'X-Api-Key': API_KEY }
+            response = requests.get(API_URL + domain, headers=headers, timeout=5)
+            response.raise_for_status() # Raise an error for bad status codes
+            
+            data = response.json()
 
-        def get_date(date_val):
-            if isinstance(date_val, list):
-                return date_val[0] if date_val else None
-            return date_val
+            # Helper to convert API's Unix timestamps to a readable string
+            def format_timestamp(ts):
+                if not ts:
+                    return "Unknown"
+                try:
+                    # API gives timestamps in seconds
+                    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    return "Unknown"
 
-        creation_date = get_date(w.creation_date)
-        expiration_date = get_date(w.expiration_date)
-        updated_date = get_date(w.updated_date)
-
-        result['domain_info'] = {
-            "domain": domain,
-            "registrar": w.registrar or "Unknown", # <-- ADDED THIS LINE
-            "registered_on": creation_date.strftime('%Y-%m-%d %H:%M:%S') if creation_date else "Unknown",
-            "expires_on": expiration_date.strftime('%Y-%m-%d %H:%M:%S') if expiration_date else "Unknown",
-            "updated_on": updated_date.strftime('%Y-%m-%d %H:%M:%S') if updated_date else "Unknown",
-        }
+            result['domain_info'] = {
+                "domain": data.get("domain_name", domain),
+                "registrar": data.get("registrar", "Unknown"),
+                "registered_on": format_timestamp(data.get("creation_date")),
+                "expires_on": format_timestamp(data.get("expiration_date")),
+                "updated_on": format_timestamp(data.get("updated_date")),
+            }
         
-    except Exception as e:
-        result['domain_info'] = {}
+        except Exception as e:
+            print(f"WHOIS API error: {e}") # For debugging in Vercel logs
+            result['domain_info'] = {"error": "Could not fetch WHOIS data."}
+    else:
+        print("WHOIS API key not set.") # For debugging
+        result['domain_info'] = {"error": "WHOIS API key not configured on server."}
+    # --- END OF REPLACED BLOCK ---
 
     
     end_time = time.perf_counter() 
