@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 import tldextract
 import time 
 import re
-from urllib.parse import urljoin, urlsplit # <-- NEW IMPORTS
+import socket
+from urllib.parse import urljoin, urlsplit
 
 app = Flask(__name__)
 
@@ -203,7 +204,8 @@ def extract_seo_from_html(html: str) -> dict:
             'seo_score': seo_score,
             'seo_grade': get_seo_grade(seo_score)
         }
-    except Exception:
+    except Exception as e:
+        print(f"SEO extraction error: {e}")
         return {
             'title': None,
             'description': None,
@@ -240,6 +242,56 @@ def get_seo_grade(score):
     else:
         return 'F'
 
+def get_whois_info_safe(domain):
+    """
+    Safely gets WHOIS info with timeout protection for serverless environments.
+    Returns domain info dict with 'Unknown' values if WHOIS fails.
+    """
+    default_info = {
+        "domain": domain,
+        "registrar": "Unknown",
+        "registered_on": "Unknown",
+        "expires_on": "Unknown",
+        "updated_on": "Unknown",
+    }
+    
+    try:
+        # Set a short timeout for WHOIS queries (critical for Vercel)
+        original_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(3)
+        
+        w = whois.whois(domain)
+
+        def get_date(date_val):
+            if isinstance(date_val, list):
+                return date_val[0] if date_val else None
+            return date_val
+
+        creation_date = get_date(w.creation_date)
+        expiration_date = get_date(w.expiration_date)
+        updated_date = get_date(w.updated_date)
+
+        return {
+            "domain": domain,
+            "registrar": w.registrar if w.registrar else "Unknown",
+            "registered_on": creation_date.strftime('%Y-%m-%d %H:%M:%S') if creation_date else "Unknown",
+            "expires_on": expiration_date.strftime('%Y-%m-%d %H:%M:%S') if expiration_date else "Unknown",
+            "updated_on": updated_date.strftime('%Y-%m-%d %H:%M:%S') if updated_date else "Unknown",
+        }
+        
+    except socket.timeout:
+        print(f"WHOIS timeout for {domain} (expected in serverless)")
+        return default_info
+    except Exception as e:
+        print(f"WHOIS failed for {domain}: {str(e)}")
+        return default_info
+    finally:
+        # Always reset socket timeout
+        try:
+            socket.setdefaulttimeout(original_timeout)
+        except:
+            socket.setdefaulttimeout(None)
+
 def check_url(url):
     """Checks a single URL and returns a result dictionary."""
     start_time = time.perf_counter() 
@@ -250,7 +302,6 @@ def check_url(url):
         "domain_info": {},
         "seo": {"title": None, "description": None, "keywords": None},
         "duration": "0.00s",
-        # "sitemap_url": None  <-- REMOVED
     }
 
     # Validate URL
@@ -280,36 +331,13 @@ def check_url(url):
         if response.ok and 'text/html' in content_type:
             result['seo'] = extract_seo_from_html(response.text)
     except requests.exceptions.Timeout:
-        result['status'] = "Not Working"
+        result['status'] = "Not Working (Timeout)"
     except requests.exceptions.RequestException as e:
         result['status'] = "Not Working"
+        print(f"Request failed for {url}: {e}")
 
-    # --- SITEMAP FINDER LOGIC REMOVED ---
-
-    # WHOIS / domain info
-    try:
-        w = whois.whois(domain)
-
-        def get_date(date_val):
-            if isinstance(date_val, list):
-                return date_val[0] if date_val else None
-            return date_val
-
-        creation_date = get_date(w.creation_date)
-        expiration_date = get_date(w.expiration_date)
-        updated_date = get_date(w.updated_date)
-
-        result['domain_info'] = {
-            "domain": domain,
-            "registrar": w.registrar or "Unknown", # <-- ADDED THIS LINE
-            "registered_on": creation_date.strftime('%Y-%m-%d %H:%M:%S') if creation_date else "Unknown",
-            "expires_on": expiration_date.strftime('%Y-%m-%d %H:%M:%S') if expiration_date else "Unknown",
-            "updated_on": updated_date.strftime('%Y-%m-%d %H:%M:%S') if updated_date else "Unknown",
-        }
-        
-    except Exception as e:
-        result['domain_info'] = {}
-
+    # Get WHOIS info using the safe wrapper
+    result['domain_info'] = get_whois_info_safe(domain)
     
     end_time = time.perf_counter() 
     result['duration'] = f"{end_time - start_time:.2f}s" 
@@ -341,9 +369,10 @@ def check_one():
     
     return jsonify(result=result)
 
-# --- NEW ROUTE TO GENERATE SITEMAP ---
+
 @app.route("/generate_sitemap", methods=["POST"])
 def generate_sitemap():
+    """Generates sitemap by crawling the website."""
     data = request.get_json()
     url = data.get('url')
     
@@ -357,7 +386,6 @@ def generate_sitemap():
     found_urls = crawl_site(url)
     
     return jsonify(urls=list(found_urls))
-# --- END OF NEW ROUTE ---
 
 
 if __name__ == "__main__":
