@@ -8,10 +8,12 @@ import tldextract
 import time 
 import re
 import socket
-import ssl
 from urllib.parse import urljoin, urlsplit
 
 app = Flask(__name__)
+
+# Get API key from environment variable
+WHOIS_API_KEY = os.getenv('WHOIS_API_KEY', '')
 
 # --- CRAWLER FUNCTION ---
 def crawl_site(start_url, max_pages=50):
@@ -243,171 +245,94 @@ def get_seo_grade(score):
         return 'F'
 
 
-def get_ssl_info(domain):
+def get_whois_data_from_api(domain):
     """
-    Get SSL certificate information for a domain (FREE).
-    Returns issuer, expiry date, and validity status.
+    Get WHOIS data using RapidAPI's FREE WHOIS API (500 requests/month).
+    Returns registrar, registration date, expiration date, and updated date.
     """
-    ssl_info = {
-        "has_ssl": False,
-        "issuer": "Unknown",
-        "issued_to": "Unknown",
-        "valid_from": "Unknown",
-        "valid_until": "Unknown",
-        "days_until_expiry": None,
-        "is_valid": False
+    default_info = {
+        "domain": domain,
+        "registrar": "Unknown",
+        "registered_on": "Unknown",
+        "expires_on": "Unknown",
+        "updated_on": "Unknown"
     }
     
-    try:
-        context = ssl.create_default_context()
-        with socket.create_connection((domain, 443), timeout=5) as sock:
-            with context.wrap_socket(sock, server_hostname=domain) as ssock:
-                cert = ssock.getpeercert()
-                
-                ssl_info["has_ssl"] = True
-                
-                # Get issuer
-                issuer = dict(x[0] for x in cert['issuer'])
-                ssl_info["issuer"] = issuer.get('organizationName', 'Unknown')
-                
-                # Get subject (issued to)
-                subject = dict(x[0] for x in cert['subject'])
-                ssl_info["issued_to"] = subject.get('commonName', domain)
-                
-                # Get validity dates
-                not_before = datetime.strptime(cert['notBefore'], '%b %d %H:%M:%S %Y %Z')
-                not_after = datetime.strptime(cert['notAfter'], '%b %d %H:%M:%S %Y %Z')
-                
-                ssl_info["valid_from"] = not_before.strftime('%Y-%m-%d')
-                ssl_info["valid_until"] = not_after.strftime('%Y-%m-%d')
-                
-                # Calculate days until expiry
-                now = datetime.now()
-                days_left = (not_after - now).days
-                ssl_info["days_until_expiry"] = days_left
-                
-                # Check if valid
-                ssl_info["is_valid"] = not_before <= now <= not_after
-                
-    except Exception as e:
-        print(f"SSL check failed for {domain}: {e}")
+    # Check if API key is configured
+    if not WHOIS_API_KEY:
+        print("⚠️ WHOIS_API_KEY not set - returning Unknown values")
+        print("👉 Get FREE API key from: https://rapidapi.com/Whois-Lookup-Whois-Lookup-default/api/whois-lookup8")
+        print("📝 Sign up for 100% FREE plan (500 requests/month, NO CREDIT CARD!)")
+        return default_info
     
-    return ssl_info
-
-
-def get_domain_age_from_archive(domain):
-    """
-    Get approximate domain age from Internet Archive Wayback Machine (FREE).
-    Returns the first snapshot date found.
-    """
     try:
-        # Query Wayback Machine API
-        url = f"http://archive.org/wayback/available?url={domain}"
-        response = requests.get(url, timeout=5)
+        # Call RapidAPI WHOIS v2 (FREE - 500 requests/month)
+        print(f"🔍 Fetching WHOIS data for {domain} from RapidAPI...")
+        
+        response = requests.get(
+            f'https://whois-v2.p.rapidapi.com/domain',
+            params={'domain': domain},
+            headers={
+                'X-RapidAPI-Key': WHOIS_API_KEY,
+                'X-RapidAPI-Host': 'whois-v2.p.rapidapi.com'
+            },
+            timeout=10
+        )
         
         if response.ok:
             data = response.json()
-            archived_snapshots = data.get('archived_snapshots', {})
-            closest = archived_snapshots.get('closest', {})
             
-            if closest and 'timestamp' in closest:
-                timestamp = closest['timestamp']
-                # Parse timestamp (format: YYYYMMDDhhmmss)
-                archive_date = datetime.strptime(timestamp[:8], '%Y%m%d')
-                
-                # Calculate age
-                age_days = (datetime.now() - archive_date).days
-                age_years = age_days / 365.25
-                
-                return {
-                    "first_seen": archive_date.strftime('%Y-%m-%d'),
-                    "age_days": age_days,
-                    "age_years": round(age_years, 1),
-                    "status": "Found in Archive"
-                }
-    except Exception as e:
-        print(f"Archive.org check failed for {domain}: {e}")
-    
-    return {
-        "first_seen": "Unknown",
-        "age_days": None,
-        "age_years": None,
-        "status": "Not Found"
-    }
-
-
-def get_dns_records(domain):
-    """
-    Get basic DNS information (FREE).
-    Returns A records, MX records, and nameservers.
-    """
-    dns_info = {
-        "has_a_record": False,
-        "has_mx_record": False,
-        "has_nameservers": False,
-        "ip_addresses": [],
-        "mail_servers": [],
-        "nameservers": []
-    }
-    
-    try:
-        import dns.resolver
-        
-        # Get A records (IP addresses)
-        try:
-            answers = dns.resolver.resolve(domain, 'A')
-            dns_info["ip_addresses"] = [str(rdata) for rdata in answers]
-            dns_info["has_a_record"] = True
-        except:
-            pass
-        
-        # Get MX records (mail servers)
-        try:
-            answers = dns.resolver.resolve(domain, 'MX')
-            dns_info["mail_servers"] = [str(rdata.exchange) for rdata in answers]
-            dns_info["has_mx_record"] = True
-        except:
-            pass
-        
-        # Get NS records (nameservers)
-        try:
-            answers = dns.resolver.resolve(domain, 'NS')
-            dns_info["nameservers"] = [str(rdata) for rdata in answers]
-            dns_info["has_nameservers"] = True
-        except:
-            pass
+            # Extract WHOIS data from RapidAPI response
+            registrar = data.get('registrar', 'Unknown')
+            created_date = data.get('createdDate', '')
+            expiry_date = data.get('expiryDate', '')
+            updated_date = data.get('updatedDate', '')
             
+            # Format dates nicely
+            def format_whois_date(date_str):
+                if not date_str:
+                    return "Unknown"
+                try:
+                    # RapidAPI returns dates in ISO format
+                    if 'T' in date_str:
+                        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                        return dt.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        # Try parsing as date only
+                        dt = datetime.strptime(date_str.split()[0], '%Y-%m-%d')
+                        return dt.strftime('%Y-%m-%d %H:%M:%S')
+                except Exception as e:
+                    print(f"Date parsing error: {e}")
+                    return date_str if date_str else "Unknown"
+            
+            result = {
+                "domain": domain,
+                "registrar": registrar if registrar else "Unknown",
+                "registered_on": format_whois_date(created_date),
+                "expires_on": format_whois_date(expiry_date),
+                "updated_on": format_whois_date(updated_date)
+            }
+            
+            print(f"✅ WHOIS data retrieved successfully for {domain}")
+            print(f"   Registrar: {result['registrar']}")
+            return result
+            
+        else:
+            print(f"❌ RapidAPI WHOIS error for {domain}: HTTP {response.status_code}")
+            if response.status_code == 401 or response.status_code == 403:
+                print("🔑 Invalid API key - check your WHOIS_API_KEY")
+            elif response.status_code == 429:
+                print("⏳ Rate limit reached (500/month) - wait for next month")
+            else:
+                print(f"Response: {response.text[:200]}")
+            return default_info
+            
+    except requests.exceptions.Timeout:
+        print(f"⏱️ RapidAPI timeout for {domain}")
+        return default_info
     except Exception as e:
-        print(f"DNS lookup failed for {domain}: {e}")
-    
-    return dns_info
-
-
-def get_domain_info_free(domain):
-    """
-    Comprehensive FREE domain information gathering.
-    Combines SSL, Archive.org, and DNS data.
-    """
-    domain_info = {
-        "domain": domain,
-        "ssl": {},
-        "age": {},
-        "dns": {}
-    }
-    
-    # Get SSL certificate info
-    print(f"Checking SSL for {domain}...")
-    domain_info["ssl"] = get_ssl_info(domain)
-    
-    # Get domain age from Archive.org
-    print(f"Checking Archive.org for {domain}...")
-    domain_info["age"] = get_domain_age_from_archive(domain)
-    
-    # Get DNS records
-    print(f"Checking DNS for {domain}...")
-    domain_info["dns"] = get_dns_records(domain)
-    
-    return domain_info
+        print(f"❌ RapidAPI WHOIS failed for {domain}: {str(e)}")
+        return default_info
 
 
 def check_url(url):
@@ -454,8 +379,8 @@ def check_url(url):
         result['status'] = "Not Working"
         print(f"Request failed for {url}: {e}")
 
-    # Get FREE domain info (SSL, Archive.org, DNS)
-    result['domain_info'] = get_domain_info_free(domain)
+    # Get WHOIS data from FREE RapidAPI
+    result['domain_info'] = get_whois_data_from_api(domain)
     
     end_time = time.perf_counter() 
     result['duration'] = f"{end_time - start_time:.2f}s" 
