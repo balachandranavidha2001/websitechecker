@@ -1,7 +1,6 @@
 from flask import Flask, render_template, request, jsonify
 import os
 import requests
-import whois
 import validators  
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
@@ -9,6 +8,7 @@ import tldextract
 import time 
 import re
 import socket
+import ssl
 from urllib.parse import urljoin, urlsplit
 
 app = Flask(__name__)
@@ -242,55 +242,173 @@ def get_seo_grade(score):
     else:
         return 'F'
 
-def get_whois_info_safe(domain):
+
+def get_ssl_info(domain):
     """
-    Safely gets WHOIS info with timeout protection for serverless environments.
-    Returns domain info dict with 'Unknown' values if WHOIS fails.
+    Get SSL certificate information for a domain (FREE).
+    Returns issuer, expiry date, and validity status.
     """
-    default_info = {
-        "domain": domain,
-        "registrar": "Unknown",
-        "registered_on": "Unknown",
-        "expires_on": "Unknown",
-        "updated_on": "Unknown",
+    ssl_info = {
+        "has_ssl": False,
+        "issuer": "Unknown",
+        "issued_to": "Unknown",
+        "valid_from": "Unknown",
+        "valid_until": "Unknown",
+        "days_until_expiry": None,
+        "is_valid": False
     }
     
     try:
-        # Set a short timeout for WHOIS queries (critical for Vercel)
-        original_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(3)
-        
-        w = whois.whois(domain)
-
-        def get_date(date_val):
-            if isinstance(date_val, list):
-                return date_val[0] if date_val else None
-            return date_val
-
-        creation_date = get_date(w.creation_date)
-        expiration_date = get_date(w.expiration_date)
-        updated_date = get_date(w.updated_date)
-
-        return {
-            "domain": domain,
-            "registrar": w.registrar if w.registrar else "Unknown",
-            "registered_on": creation_date.strftime('%Y-%m-%d %H:%M:%S') if creation_date else "Unknown",
-            "expires_on": expiration_date.strftime('%Y-%m-%d %H:%M:%S') if expiration_date else "Unknown",
-            "updated_on": updated_date.strftime('%Y-%m-%d %H:%M:%S') if updated_date else "Unknown",
-        }
-        
-    except socket.timeout:
-        print(f"WHOIS timeout for {domain} (expected in serverless)")
-        return default_info
+        context = ssl.create_default_context()
+        with socket.create_connection((domain, 443), timeout=5) as sock:
+            with context.wrap_socket(sock, server_hostname=domain) as ssock:
+                cert = ssock.getpeercert()
+                
+                ssl_info["has_ssl"] = True
+                
+                # Get issuer
+                issuer = dict(x[0] for x in cert['issuer'])
+                ssl_info["issuer"] = issuer.get('organizationName', 'Unknown')
+                
+                # Get subject (issued to)
+                subject = dict(x[0] for x in cert['subject'])
+                ssl_info["issued_to"] = subject.get('commonName', domain)
+                
+                # Get validity dates
+                not_before = datetime.strptime(cert['notBefore'], '%b %d %H:%M:%S %Y %Z')
+                not_after = datetime.strptime(cert['notAfter'], '%b %d %H:%M:%S %Y %Z')
+                
+                ssl_info["valid_from"] = not_before.strftime('%Y-%m-%d')
+                ssl_info["valid_until"] = not_after.strftime('%Y-%m-%d')
+                
+                # Calculate days until expiry
+                now = datetime.now()
+                days_left = (not_after - now).days
+                ssl_info["days_until_expiry"] = days_left
+                
+                # Check if valid
+                ssl_info["is_valid"] = not_before <= now <= not_after
+                
     except Exception as e:
-        print(f"WHOIS failed for {domain}: {str(e)}")
-        return default_info
-    finally:
-        # Always reset socket timeout
+        print(f"SSL check failed for {domain}: {e}")
+    
+    return ssl_info
+
+
+def get_domain_age_from_archive(domain):
+    """
+    Get approximate domain age from Internet Archive Wayback Machine (FREE).
+    Returns the first snapshot date found.
+    """
+    try:
+        # Query Wayback Machine API
+        url = f"http://archive.org/wayback/available?url={domain}"
+        response = requests.get(url, timeout=5)
+        
+        if response.ok:
+            data = response.json()
+            archived_snapshots = data.get('archived_snapshots', {})
+            closest = archived_snapshots.get('closest', {})
+            
+            if closest and 'timestamp' in closest:
+                timestamp = closest['timestamp']
+                # Parse timestamp (format: YYYYMMDDhhmmss)
+                archive_date = datetime.strptime(timestamp[:8], '%Y%m%d')
+                
+                # Calculate age
+                age_days = (datetime.now() - archive_date).days
+                age_years = age_days / 365.25
+                
+                return {
+                    "first_seen": archive_date.strftime('%Y-%m-%d'),
+                    "age_days": age_days,
+                    "age_years": round(age_years, 1),
+                    "status": "Found in Archive"
+                }
+    except Exception as e:
+        print(f"Archive.org check failed for {domain}: {e}")
+    
+    return {
+        "first_seen": "Unknown",
+        "age_days": None,
+        "age_years": None,
+        "status": "Not Found"
+    }
+
+
+def get_dns_records(domain):
+    """
+    Get basic DNS information (FREE).
+    Returns A records, MX records, and nameservers.
+    """
+    dns_info = {
+        "has_a_record": False,
+        "has_mx_record": False,
+        "has_nameservers": False,
+        "ip_addresses": [],
+        "mail_servers": [],
+        "nameservers": []
+    }
+    
+    try:
+        import dns.resolver
+        
+        # Get A records (IP addresses)
         try:
-            socket.setdefaulttimeout(original_timeout)
+            answers = dns.resolver.resolve(domain, 'A')
+            dns_info["ip_addresses"] = [str(rdata) for rdata in answers]
+            dns_info["has_a_record"] = True
         except:
-            socket.setdefaulttimeout(None)
+            pass
+        
+        # Get MX records (mail servers)
+        try:
+            answers = dns.resolver.resolve(domain, 'MX')
+            dns_info["mail_servers"] = [str(rdata.exchange) for rdata in answers]
+            dns_info["has_mx_record"] = True
+        except:
+            pass
+        
+        # Get NS records (nameservers)
+        try:
+            answers = dns.resolver.resolve(domain, 'NS')
+            dns_info["nameservers"] = [str(rdata) for rdata in answers]
+            dns_info["has_nameservers"] = True
+        except:
+            pass
+            
+    except Exception as e:
+        print(f"DNS lookup failed for {domain}: {e}")
+    
+    return dns_info
+
+
+def get_domain_info_free(domain):
+    """
+    Comprehensive FREE domain information gathering.
+    Combines SSL, Archive.org, and DNS data.
+    """
+    domain_info = {
+        "domain": domain,
+        "ssl": {},
+        "age": {},
+        "dns": {}
+    }
+    
+    # Get SSL certificate info
+    print(f"Checking SSL for {domain}...")
+    domain_info["ssl"] = get_ssl_info(domain)
+    
+    # Get domain age from Archive.org
+    print(f"Checking Archive.org for {domain}...")
+    domain_info["age"] = get_domain_age_from_archive(domain)
+    
+    # Get DNS records
+    print(f"Checking DNS for {domain}...")
+    domain_info["dns"] = get_dns_records(domain)
+    
+    return domain_info
+
 
 def check_url(url):
     """Checks a single URL and returns a result dictionary."""
@@ -336,8 +454,8 @@ def check_url(url):
         result['status'] = "Not Working"
         print(f"Request failed for {url}: {e}")
 
-    # Get WHOIS info using the safe wrapper
-    result['domain_info'] = get_whois_info_safe(domain)
+    # Get FREE domain info (SSL, Archive.org, DNS)
+    result['domain_info'] = get_domain_info_free(domain)
     
     end_time = time.perf_counter() 
     result['duration'] = f"{end_time - start_time:.2f}s" 
